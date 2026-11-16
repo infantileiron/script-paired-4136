@@ -3,11 +3,13 @@ import redis
 from fastapi import APIRouter,Depends,HTTPException,Response
 from sqlalchemy.exc import IntegrityError
 from src.config.database import db
-from src.models.entities import User,Pair,Evaluation,Adoption,Audit
-from src.schemas.business import Login,PairInput,EvaluationInput,AdoptionInput
+from src.models.entities import User,Pair,Evaluation,Adoption,Audit,AnonRelease
+from src.schemas.business import Login,PairInput,EvaluationInput,AdoptionInput,ReleaseInput
 from src.middlewares.auth import current,editor,admin
 from src.utils.security import verify,token
 from src.services.business import audit,dump
+from src.services.broker import RELEASE_QUEUE,broker
+from src.services import privacy,publish as publish_service
 from src.controllers.business import ensure_evaluation
 router=APIRouter()
 @router.post('/auth/login')
@@ -63,3 +65,60 @@ def approve(i:int,u=Depends(admin),s=Depends(db)):
  r.status='approved';s.commit();audit(s,u,'签核意见 '+str(i));return dump(r)
 @router.get('/audits')
 def audits(u=Depends(admin),s=Depends(db)):return [dump(r) for r in s.query(Audit).order_by(Audit.id.desc()).limit(100)]
+# ---- 差分隐私匿名发布 ----
+@router.get('/releases/budget')
+def release_budget(u=Depends(current),s=Depends(db)):
+ """页面查询每位顾问的累计隐私预算与全部发布申请状态。"""
+ return publish_service.budget_overview(s)
+@router.get('/releases')
+def releases(u=Depends(current),s=Depends(db)):
+ return [dump(r) for r in s.query(AnonRelease).order_by(AnonRelease.id.desc()).all()]
+@router.post('/releases')
+def create_release(data:ReleaseInput,u=Depends(editor),s=Depends(db)):
+ """提交匿名发布：固定评估名单，校验裁剪界与预算可行性后入队，由 worker 异步加噪。"""
+ try:data.check_bounds()
+ except ValueError as e:raise HTTPException(422,str(e))
+ try:ev,codes=publish_service.fixed_roster(s,data.evaluation_id)
+ except LookupError:raise HTTPException(404,'评估任务不存在')
+ except ValueError as e:raise HTTPException(409,str(e))
+ # 预建预算账户，并在入队前做一次预检（最终扣账在 worker 事务内，并发以锁+行锁为准）
+ accounts=publish_service.ensure_budget_accounts(s,codes)
+ insufficient=sorted(c for c in codes
+   if accounts[c].spent_epsilon+data.epsilon>privacy.TOTAL_EPSILON+1e-12)
+ if insufficient:raise HTTPException(402,'隐私预算不足，整次拒绝：顾问 '+'、'.join(insufficient))
+ r=AnonRelease(evaluation_id=ev.id,name=data.name or ('匿名发布-评估'+str(ev.id)),
+   state='pending',roster=codes,lower=data.lower,upper=data.upper,epsilon=data.epsilon,
+   attempts=0,created=publish_service.now_iso(),updated=publish_service.now_iso())
+ s.add(r);s.commit()
+ try:broker().rpush(RELEASE_QUEUE,r.id)
+ except Exception:
+  # 队列故障不允许产生永远 pending 的申请：标记失败，未扣任何预算
+  r.state='failed';r.error='队列暂不可用，请稍后重新提交';s.commit();raise HTTPException(503,r.error)
+ audit(s,u,'提交匿名发布 '+str(r.id)+' 名单'+str(len(codes))+'人')
+ return dump(r)
+@router.get('/releases/{i}')
+def release_detail(i:int,u=Depends(current),s=Depends(db)):
+ r=s.get(AnonRelease,i)
+ if not r:raise HTTPException(404,'匿名发布申请不存在')
+ return dump(r)
+@router.get('/releases/{i}/download')
+def release_download(i:int,u=Depends(current),s=Depends(db)):
+ """仅当产物可下载时返回对外 JSON；下载可见即已扣账。内部原报告不在其中。"""
+ r=s.get(AnonRelease,i)
+ if not r:raise HTTPException(404,'匿名发布申请不存在')
+ if r.state!='downloadable' or not r.result:
+  raise HTTPException(409,'发布尚未完成或已失败，暂不可下载')
+ payload=dict(r.result)
+ return Response(json.dumps(payload,ensure_ascii=False,indent=2),media_type='application/json',
+  headers={'Content-Disposition':f'attachment; filename="anon-release-{i}.json"'})
+@router.post('/releases/{i}/retry')
+def release_retry(i:int,u=Depends(editor),s=Depends(db)):
+ """失败/待处理申请重试：复用原申请与确定性噪声，不重扣预算。"""
+ r=s.get(AnonRelease,i)
+ if not r:raise HTTPException(404,'匿名发布申请不存在')
+ if r.state=='downloadable':raise HTTPException(409,'发布已可下载，无需重试')
+ r.state='pending';r.updated=publish_service.now_iso();s.commit()
+ try:broker().rpush(RELEASE_QUEUE,r.id)
+ except Exception:raise HTTPException(503,'队列暂不可用，请稍后重试')
+ audit(s,u,'重试匿名发布 '+str(i))
+ return dump(r)

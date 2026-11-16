@@ -287,6 +287,110 @@ ALTER TABLE ONLY public.adoptions
 
 
 --
+-- Name: anon_releases; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.anon_releases (
+    id integer NOT NULL,
+    evaluation_id integer NOT NULL,
+    name character varying(120) DEFAULT ''::character varying,
+    state character varying(20) NOT NULL DEFAULT 'pending'::character varying,
+    roster json NOT NULL,
+    lower double precision NOT NULL,
+    upper double precision NOT NULL,
+    epsilon double precision NOT NULL,
+    artifact_path character varying(300) DEFAULT ''::character varying,
+    result json,
+    error text DEFAULT ''::text,
+    attempts integer DEFAULT 0,
+    created character varying(40),
+    updated character varying(40)
+);
+
+
+CREATE SEQUENCE public.anon_releases_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.anon_releases_id_seq OWNED BY public.anon_releases.id;
+
+
+--
+-- Name: privacy_budgets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.privacy_budgets (
+    id integer NOT NULL,
+    consultant_code character varying(60) NOT NULL,
+    total_epsilon double precision NOT NULL,
+    spent_epsilon double precision NOT NULL DEFAULT 0.0
+);
+
+
+CREATE SEQUENCE public.privacy_budgets_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.privacy_budgets_id_seq OWNED BY public.privacy_budgets.id;
+
+
+--
+-- Name: privacy_ledger; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.privacy_ledger (
+    id integer NOT NULL,
+    release_id integer NOT NULL,
+    consultant_code character varying(60) NOT NULL,
+    epsilon double precision NOT NULL,
+    created character varying(40)
+);
+
+
+CREATE SEQUENCE public.privacy_ledger_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.privacy_ledger_id_seq OWNED BY public.privacy_ledger.id;
+
+
+ALTER TABLE ONLY public.anon_releases ALTER COLUMN id SET DEFAULT nextval('public.anon_releases_id_seq'::regclass);
+ALTER TABLE ONLY public.privacy_budgets ALTER COLUMN id SET DEFAULT nextval('public.privacy_budgets_id_seq'::regclass);
+ALTER TABLE ONLY public.privacy_ledger ALTER COLUMN id SET DEFAULT nextval('public.privacy_ledger_id_seq'::regclass);
+
+
+ALTER TABLE ONLY public.anon_releases
+    ADD CONSTRAINT anon_releases_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.anon_releases
+    ADD CONSTRAINT anon_releases_evaluation_id_fkey FOREIGN KEY (evaluation_id) REFERENCES public.evaluations(id);
+ALTER TABLE ONLY public.privacy_budgets
+    ADD CONSTRAINT privacy_budgets_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.privacy_budgets
+    ADD CONSTRAINT privacy_budgets_consultant_code_key UNIQUE (consultant_code);
+ALTER TABLE ONLY public.privacy_ledger
+    ADD CONSTRAINT privacy_ledger_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.privacy_ledger
+    ADD CONSTRAINT uq_ledger_release_consultant UNIQUE (release_id, consultant_code);
+ALTER TABLE ONLY public.privacy_ledger
+    ADD CONSTRAINT privacy_ledger_release_id_fkey FOREIGN KEY (release_id) REFERENCES public.anon_releases(id);
+
+
+--
 -- PostgreSQL database dump complete
 --
 
